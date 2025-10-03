@@ -6,17 +6,7 @@ import wandb
 from collections import deque
 import random
 import argparse
-
-wandb.init(project="NMMO", entity="NeuralMMOUTRGV", config={
-    "learning_rate": 3e-4,
-    "gamma": 0.99,
-    "epsilon_start": 1.0,
-    "epsilon_end": 0.01,
-    "epsilon_decay": 0.995,
-    "buffer_size": 50000,
-    "batch_size": 64,
-    "target_update": 10
-})
+import os
 
 class CNNAgent(nn.Module):
     
@@ -71,23 +61,24 @@ class ReplayBuffer:
 
 class NMMOBaselineAgent:
     
-    def __init__(self, obs_shape, n_actions, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    def __init__(self, obs_shape, n_actions, config, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
         self.n_actions = n_actions
+        self.config = config
         
         self.policy_net = CNNAgent(obs_shape, n_actions).to(device)
         self.target_net = CNNAgent(obs_shape, n_actions).to(device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
         self.optimizer = optim.Adam(self.policy_net.parameters(), 
-                                     lr=wandb.config.learning_rate)
+                                     lr=config['learning_rate'])
         self.criterion = nn.SmoothL1Loss()
         
-        self.memory = ReplayBuffer(wandb.config.buffer_size)
+        self.memory = ReplayBuffer(config['buffer_size'])
         
-        self.epsilon = wandb.config.epsilon_start
-        self.epsilon_min = wandb.config.epsilon_end
-        self.epsilon_decay = wandb.config.epsilon_decay
+        self.epsilon = config['epsilon_start']
+        self.epsilon_min = config['epsilon_end']
+        self.epsilon_decay = config['epsilon_decay']
         
         self.steps = 0
         self.episodes = 0
@@ -102,11 +93,11 @@ class NMMOBaselineAgent:
             return q_values.max(1)[1].item()
     
     def train_step(self):
-        if len(self.memory) < wandb.config.batch_size:
+        if len(self.memory) < self.config['batch_size']:
             return None
         
         states, actions, rewards, next_states, dones = self.memory.sample(
-            wandb.config.batch_size)
+            self.config['batch_size'])
         
         states = torch.FloatTensor(states).to(self.device)
         actions = torch.LongTensor(actions).to(self.device)
@@ -118,7 +109,7 @@ class NMMOBaselineAgent:
         
         with torch.no_grad():
             next_q = self.target_net(next_states).max(1)[0]
-            target_q = rewards + (1 - dones) * wandb.config.gamma * next_q
+            target_q = rewards + (1 - dones) * self.config['gamma'] * next_q
         
         loss = self.criterion(current_q.squeeze(), target_q)
         
@@ -126,13 +117,6 @@ class NMMOBaselineAgent:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
         self.optimizer.step()
-        
-        wandb.log({
-            "loss": loss.item(),
-            "epsilon": self.epsilon,
-            "q_value": current_q.mean().item(),
-            "step": self.steps
-        })
         
         return loss.item()
     
@@ -151,10 +135,9 @@ class NMMOBaselineAgent:
             'steps': self.steps,
             'episodes': self.episodes
         }, path)
-        wandb.save(path)
     
     def load(self, path):
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, map_location=self.device)
         self.policy_net.load_state_dict(checkpoint['policy_net'])
         self.target_net.load_state_dict(checkpoint['target_net'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
@@ -217,8 +200,8 @@ def process_observation(obs_dict):
     return obs_array.astype(np.float32)
 
 
-def train_agent(env, agent, n_episodes=1000):
-    for episode in range(n_episodes):
+def train_agent(env, agent, args, use_wandb=False):
+    for episode in range(args.episodes):
         reset_result = env.reset()
         if isinstance(reset_result, tuple):
             obs = reset_result[0] if len(reset_result) > 0 else {}
@@ -227,136 +210,195 @@ def train_agent(env, agent, n_episodes=1000):
         
         episode_reward = 0
         episode_steps = 0
+        episode_loss = []
+        
         prev_obs = {}
+        prev_actions = {}
+        
         for agent_id in env.agents:
             if agent_id in obs:
                 prev_obs[agent_id] = process_observation(obs[agent_id])
         
-        while env.agents and episode_steps < 1000:
+        while env.agents and episode_steps < args.max_steps:
             actions = {}
-            action_indices = {}
+            
             for agent_id in env.agents:
                 if agent_id in prev_obs:
                     state = prev_obs[agent_id]
-                    action_idx = agent.select_action(state)
-                    action_indices[agent_id] = action_idx
+                    action_idx = agent.select_action(state, training=True)
+                    prev_actions[agent_id] = action_idx
                     actions[agent_id] = env.action_space(agent_id).sample()
+            
             try:
                 step_result = env.step(actions)
+                
+                if isinstance(step_result, tuple) and len(step_result) >= 4:
+                    next_obs, rewards, dones, truncated = step_result[:4]
+                else:
+                    break
+                
+                if args.render:
+                    env.render()
+                
+                for agent_id in list(prev_obs.keys()):
+                    if agent_id in next_obs:
+                        state = prev_obs[agent_id]
+                        next_state = process_observation(next_obs[agent_id])
+                        reward = rewards.get(agent_id, 0)
+                        done = dones.get(agent_id, False) or truncated.get(agent_id, False)
+                        action = prev_actions.get(agent_id, 0)
+                        
+                        agent.memory.push(state, action, reward, next_state, done)
+                        episode_reward += reward
+                
+                loss = agent.train_step()
+                if loss is not None:
+                    episode_loss.append(loss)
+                
+                if agent.steps % agent.config['target_update'] == 0:
+                    agent.update_target_network()
+                
+                agent.steps += 1
+                episode_steps += 1
+                
+                prev_obs = {}
+                for agent_id in env.agents:
+                    if agent_id in next_obs:
+                        prev_obs[agent_id] = process_observation(next_obs[agent_id])
+                
             except Exception as e:
                 print(f"Error during step: {e}")
                 import traceback
                 traceback.print_exc()
                 break
-            if isinstance(step_result, tuple):
-                if len(step_result) == 4:
-                    obs, rewards, dones, infos = step_result
-                elif len(step_result) == 5:
-                    obs, rewards, dones, truncated, infos = step_result
-                else:
-                    print(f"Unexpected step result: {len(step_result)} elements")
-                    break
-            else:
-                print(f"Step returned non-tuple: {type(step_result)}")
-                break
-            curr_obs = {}
-            for agent_id in env.agents:
-                if agent_id in obs:
-                    curr_obs[agent_id] = process_observation(obs[agent_id])
-            for agent_id in action_indices.keys():
-                if agent_id in rewards:
-                    reward = rewards[agent_id]
-                    done = dones.get(agent_id, False)
-                    if agent_id in curr_obs:
-                        next_state = curr_obs[agent_id]
-                    else:
-                        next_state = np.zeros_like(prev_obs[agent_id])
-                    agent.memory.push(
-                        prev_obs[agent_id],
-                        action_indices[agent_id],
-                        reward,
-                        next_state,
-                        done
-                    )
-                    episode_reward += reward
-            loss = agent.train_step()
-            prev_obs = curr_obs
-            episode_steps += 1
-            agent.steps += 1
-            if agent.steps % wandb.config.target_update == 0:
-                agent.update_target_network()
+        
         agent.update_epsilon()
         agent.episodes += 1
-        wandb.log({
-            "episode_reward": episode_reward,
-            "episode_steps": episode_steps,
-            "episode": episode
-        })
-        if episode % 100 == 0:
-            agent.save(f"checkpoint_ep{episode}.pt")
-            print(f"Episode {episode}: Reward={episode_reward:.2f}, "
-                  f"Steps={episode_steps}, Epsilon={agent.epsilon:.3f}")
-    wandb.finish()
+        
+        avg_loss = np.mean(episode_loss) if episode_loss else 0
+        
+        if (episode + 1) % args.log_interval == 0:
+            print(f"Episode {episode + 1}/{args.episodes} | "
+                  f"Reward: {episode_reward:.2f} | "
+                  f"Steps: {episode_steps} | "
+                  f"Loss: {avg_loss:.4f} | "
+                  f"Epsilon: {agent.epsilon:.3f} | "
+                  f"Memory: {len(agent.memory)}")
+        
+        if use_wandb:
+            wandb.log({
+                "episode": episode + 1,
+                "episode_reward": episode_reward,
+                "episode_steps": episode_steps,
+                "avg_loss": avg_loss,
+                "epsilon": agent.epsilon,
+                "memory_size": len(agent.memory)
+            })
+        
+        if (episode + 1) % args.save_interval == 0:
+            save_path = f"{args.checkpoint_dir}/checkpoint_ep{episode + 1}.pt"
+            agent.save(save_path)
+            print(f"Saved checkpoint to {save_path}")
+            if use_wandb:
+                wandb.save(save_path)
+    
+    final_path = f"{args.checkpoint_dir}/final_checkpoint.pt"
+    agent.save(final_path)
+    print(f"\nTraining complete! Final checkpoint saved to {final_path}")
+    if use_wandb:
+        wandb.save(final_path)
 
 
 if __name__ == "__main__":
     import nmmo
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to run")
+    parser = argparse.ArgumentParser(description="Train NMMO DQN Agent")
+    parser.add_argument("--episodes", type=int, default=100, help="Number of episodes")
+    parser.add_argument("--max-steps", type=int, default=1000, help="Max steps per episode")
+    parser.add_argument("--render", action="store_true", help="Enable rendering")
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--epsilon-start", type=float, default=1.0)
+    parser.add_argument("--epsilon-end", type=float, default=0.01)
+    parser.add_argument("--epsilon-decay", type=float, default=0.995)
+    parser.add_argument("--buffer-size", type=int, default=50000)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--target-update", type=int, default=10)
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+    parser.add_argument("--save-interval", type=int, default=50)
+    parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument("--use-wandb", action="store_true", help="Use Weights & Biases logging")
+    parser.add_argument("--wandb-project", type=str, default="NMMO")
+    parser.add_argument("--wandb-entity", type=str, default="NeuralMMOUTRGV")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
+    
     args = parser.parse_args()
-
+    
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    
+    config = {
+        "learning_rate": args.learning_rate,
+        "gamma": args.gamma,
+        "epsilon_start": args.epsilon_start,
+        "epsilon_end": args.epsilon_end,
+        "epsilon_decay": args.epsilon_decay,
+        "buffer_size": args.buffer_size,
+        "batch_size": args.batch_size,
+        "target_update": args.target_update
+    }
+    
+    if args.use_wandb:
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=config)
+    
     try:
         print("Initializing Neural MMO environment...")
         env = nmmo.Env()
+        
         reset_result = env.reset()
-        print(f"Reset returned: {type(reset_result)}")
         if isinstance(reset_result, tuple):
-            print(f"  Tuple length: {len(reset_result)}")
-            for i, item in enumerate(reset_result):
-                print(f"  Element {i}: {type(item)}")
             obs = reset_result[0] if len(reset_result) > 0 else {}
         else:
             obs = reset_result
-        print(f"\nObs type: {type(obs)}")
+        
         print(f"Number of agents: {len(env.agents)}")
-        print(f"Agent IDs: {list(env.agents)[:5]}...")
-        if isinstance(obs, dict):
-            print(f"Obs keys: {list(obs.keys())[:5]}...")
-        first_agent = env.agents[0]
+        
+        first_agent = list(env.agents)[0]
         agent_obs = obs[first_agent]
-        print(f"\nAgent {first_agent} observation structure:")
-        print(f"  Type: {type(agent_obs)}")
-        print(f"  Keys: {list(agent_obs.keys())[:10]}..." if isinstance(agent_obs, dict) else "Not a dict")
-        if isinstance(agent_obs, dict) and len(agent_obs) > 0:
-            first_key = list(agent_obs.keys())[0]
-            first_value = agent_obs[first_key]
-            print(f"\n  First key ({first_key}) contains: {type(first_value)}")
-            if isinstance(first_value, dict):
-                print(f"    Sub-keys: {list(first_value.keys())}")
-                if len(first_value) > 0:
-                    sample_key = list(first_value.keys())[0]
-                    sample_value = first_value[sample_key]
-                    print(f"    Sample ({sample_key}): {type(sample_value)}, value: {sample_value}")
         processed_obs = process_observation(agent_obs)
         obs_shape = processed_obs.shape
-        print(f"\nProcessed observation shape: {obs_shape}")
+        print(f"Observation shape: {obs_shape}")
+        
         action_space = env.action_space(first_agent)
         if hasattr(action_space, 'n'):
             n_actions = action_space.n
         elif hasattr(action_space, 'nvec'):
             n_actions = int(np.prod(action_space.nvec))
         else:
-            n_actions = 25
+            n_actions = 256
         print(f"Action space size: {n_actions}")
-        print(f"Action space type: {type(action_space)}")
-        print("\nInitializing CNN agent...")
-        agent = NMMOBaselineAgent(obs_shape, n_actions)
+        
+        print("\nInitializing agent...")
+        agent = NMMOBaselineAgent(obs_shape, n_actions, config)
+        
+        if args.checkpoint:
+            print(f"Loading checkpoint from {args.checkpoint}")
+            agent.load(args.checkpoint)
+        
         print(f"Device: {agent.device}")
         print(f"Model parameters: {sum(p.numel() for p in agent.policy_net.parameters()):,}")
+        
         print("\nStarting training...")
-        train_agent(env, agent, n_episodes=args.episodes)
+        train_agent(env, agent, args, use_wandb=args.use_wandb)
+        
+        if args.use_wandb:
+            wandb.finish()
+        
+        if args.render:
+            env.close()
+            
     except Exception as e:
-        print(f"\n Error: {e}")
+        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
+        if args.use_wandb:
+            wandb.finish()
