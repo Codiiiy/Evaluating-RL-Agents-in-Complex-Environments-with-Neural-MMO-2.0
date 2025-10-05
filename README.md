@@ -1,9 +1,5 @@
 # Neural MMO 2.0 Reinforcement Learning Project
 
-[![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)  
-[![GitHub Issues](https://img.shields.io/github/issues/yourusername/yourrepo)](https://github.com/yourusername/yourrepo/issues)  
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-
 ## Project Overview
 This project trains and evaluates reinforcement learning (RL) agents in **Neural MMO 2.0**, a large-scale persistent environment featuring competition, cooperation, and resource-driven survival. 
 
