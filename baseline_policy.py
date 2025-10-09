@@ -34,7 +34,6 @@ class Baseline(pufferlib.models.Policy):
         self.value_head = torch.nn.Linear(hidden_size, 1)
 
     def encode_observations(self, flat_observations):
-        # Ensure all encoders are on the correct device
         device = flat_observations.device if hasattr(flat_observations, "device") else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if next(self.parameters()).device != device:
             self.to(device)
@@ -94,12 +93,10 @@ class TileEncoder(torch.nn.Module):
         self.tile_fc = torch.nn.Linear(8 * 11 * 11, input_size)
 
     def forward(self, tile):
-        # Move entire module to correct device if needed
         if tile.device != next(self.parameters()).device:
             self.to(tile.device)
         tile[:, :, :2] -= tile[:, 112:113, :2].clone()
         tile[:, :, :2] += 7
-        # Ensure both tile_offset and embedding are on the correct device
         if self.tile_offset.device != tile.device:
             self.tile_offset = self.tile_offset.to(tile.device)
         if next(self.embedding.parameters()).device != tile.device:
