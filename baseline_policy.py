@@ -34,6 +34,11 @@ class Baseline(pufferlib.models.Policy):
         self.value_head = torch.nn.Linear(hidden_size, 1)
 
     def encode_observations(self, flat_observations):
+        # Ensure all encoders are on the correct device
+        device = flat_observations.device if hasattr(flat_observations, "device") else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if next(self.parameters()).device != device:
+            self.to(device)
+        
         env_outputs = unpack_batched_obs(flat_observations, self.unflatten_context)
         tile = self.tile_encoder(env_outputs["Tile"])
         player_embeddings, my_agent = self.player_encoder(
@@ -81,7 +86,7 @@ class TileEncoder(torch.nn.Module):
     """Encodes tile observations with CNN"""
     def __init__(self, input_size):
         super().__init__()
-        self.tile_offset = torch.tensor([i * 256 for i in range(3)])
+        self.register_buffer('tile_offset', torch.tensor([i * 256 for i in range(3)]))
         self.embedding = torch.nn.Embedding(3 * 256, 32)
 
         self.tile_conv_1 = torch.nn.Conv2d(96, 32, 3)
@@ -89,9 +94,17 @@ class TileEncoder(torch.nn.Module):
         self.tile_fc = torch.nn.Linear(8 * 11 * 11, input_size)
 
     def forward(self, tile):
+        # Move entire module to correct device if needed
+        if tile.device != next(self.parameters()).device:
+            self.to(tile.device)
         tile[:, :, :2] -= tile[:, 112:113, :2].clone()
         tile[:, :, :2] += 7
-        tile = self.embedding(tile.long().clip(0, 255) + self.tile_offset.to(tile.device))
+        # Ensure both tile_offset and embedding are on the correct device
+        if self.tile_offset.device != tile.device:
+            self.tile_offset = self.tile_offset.to(tile.device)
+        if next(self.embedding.parameters()).device != tile.device:
+            self.embedding = self.embedding.to(tile.device)
+        tile = self.embedding(tile.long().clip(0, 255) + self.tile_offset)
 
         agents, tiles, features, embed = tile.shape
         tile = (
@@ -134,7 +147,7 @@ class PlayerEncoder(torch.nn.Module):
         )
 
         my_agent_embeddings = one_hot_agents[torch.arange(one_hot_agents.shape[0]), row_indices]
-        agent_embeddings = self.agent_fc(one_hot_agents.cuda())
+        agent_embeddings = self.agent_fc(one_hot_agents)
         my_agent_embeddings = self.my_agent_fc(my_agent_embeddings)
         my_agent_embeddings = F.relu(my_agent_embeddings)
 
