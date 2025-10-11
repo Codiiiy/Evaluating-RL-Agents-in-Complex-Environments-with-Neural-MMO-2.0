@@ -63,14 +63,17 @@ class RewardWrapper(BaseStatWrapper):
         return agent_obs
 
     def action(self, agent_id, agent_atn):
-        if "Sell" in agent_atn and "Price" in agent_atn["Sell"]:
-            self._history[agent_id]["prev_price"] = agent_atn["Sell"]["Price"]
-        if "Move" in agent_atn and "Direction" in agent_atn["Move"]:
-            self._history[agent_id]["prev_moves"].append(agent_atn["Move"]["Direction"])
+        try:
+            if "Sell" in agent_atn and "Price" in agent_atn["Sell"]:
+                self._history[agent_id]["prev_price"] = agent_atn["Sell"]["Price"]
+            if "Move" in agent_atn and "Direction" in agent_atn["Move"]:
+                self._history[agent_id]["prev_moves"].append(agent_atn["Move"]["Direction"])
             if len(self._history[agent_id]["prev_moves"]) > 10:
                 self._history[agent_id]["prev_moves"].pop(0)
-        if "Give" in agent_atn:
-            self._coop_state[agent_id]["traded"] = True
+            if "Give" in agent_atn:
+                self._coop_state[agent_id]["traded"] = True
+        except Exception:
+            pass
         return agent_atn
 
     def reward_terminated_truncated_info(self, agent_id, reward, terminated, truncated, info):
@@ -92,9 +95,15 @@ class RewardWrapper(BaseStatWrapper):
         coop_reward = 0
 
        # 1. Survival together
-        alive_agents = [a for a, p in realm.players.items() if getattr(p, "alive", True) and p.resources.health > 0]
-        if len(alive_agents) > 1:
-            coop_reward += self.coop_survival_weight * (len(alive_agents) - 1) / max(1, len(realm.players))
+        if realm is not None and hasattr(realm, "players"):
+            alive_agents = [
+                a for a, p in realm.players.items()
+                if p is not None
+                and getattr(p, "alive", True)
+                and getattr(getattr(p, "resources", None), "health", 1) > 0
+            ]
+            if len(alive_agents) > 1:
+                coop_reward += self.coop_survival_weight * (len(alive_agents) - 1) / max(1, len(realm.players))
 
         # 2. Travel together
         if player and hasattr(player, "pos"):
@@ -130,7 +139,7 @@ class RewardWrapper(BaseStatWrapper):
                         break
 
         # 4. Healing allies
-        if player and player.resources.health_restore > 0:
+        if player and getattr(getattr(player, "resources", None), "health_restore", 0) > 0:
             coop_reward += self.coop_heal_weight
 
         # 5. Trading items or gold
