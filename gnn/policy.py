@@ -1,11 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pufferlib
+import pufferlib.models
 from pufferlib.emulation import unpack_batched_obs
 from nmmo.entity.entity import EntityState
 
 EntityId = EntityState.State.attr_name_to_col["id"]
 
+class Recurrent(pufferlib.models.RecurrentWrapper):
+    def __init__(self, env, policy, input_size=256, hidden_size=256, num_layers=1):
+        super().__init__(env, policy, input_size, hidden_size, num_layers)
+        
 def topk_neighbors(positions, k=8):
     dists = torch.cdist(positions, positions)
     idx = torch.topk(-dists, k=k, dim=-1).indices
@@ -255,9 +261,9 @@ class ActionDecoder(nn.Module):
             actions.append(action)
         return actions
 
-class Policy(nn.Module):
+class Policy(pufferlib.models.Policy):
     def __init__(self, env, input_size=256, hidden_size=256, task_size=2048):
-        super().__init__()
+        super().__init__(env)
         self.unflatten_context = env.unflatten_context
         self.tile_encoder = TileEncoder(input_size)
         self.player_encoder = PlayerEncoder(input_size, hidden_size)
@@ -271,7 +277,9 @@ class Policy(nn.Module):
         self.value_head = nn.Linear(hidden_size, 1)
 
     def encode_observations(self, flat_observations):
-        device = next(self.parameters()).device
+        device = flat_observations.device if hasattr(flat_observations, "device") else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if next(self.parameters()).device != device:
+            self.to(device)
         env_outputs = unpack_batched_obs(flat_observations, self.unflatten_context)
         tile = self.tile_encoder(env_outputs["Tile"])
         player_embeddings, my_agent = self.player_encoder(env_outputs["Entity"], env_outputs["AgentId"][:, 0])
@@ -288,7 +296,7 @@ class Policy(nn.Module):
         padded_embeddings = []
         for embedding in embeddings:
             padding_size = 1
-            padding = torch.zeros(embedding.size(0), padding_size, embedding.size(2), device=device)
+            padding = torch.zeros(embedding.size(0), padding_size, embedding.size(2), device=embedding.device)
             padded_embeddings.append(torch.cat([embedding, padding], dim=1))
         player_embeddings, item_embeddings, market_embeddings = padded_embeddings
         return obs, (player_embeddings, item_embeddings, market_embeddings, env_outputs["ActionTargets"])
@@ -297,3 +305,5 @@ class Policy(nn.Module):
         actions = self.action_decoder(hidden, lookup)
         value = self.value_head(hidden)
         return actions, value
+    
+
