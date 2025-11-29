@@ -1,0 +1,190 @@
+wandb:
+  project: NMMO
+  entity: NeuralMMOUTRGV
+  group: ~
+
+debug:
+  train:
+    num_envs: 1
+    envs_per_batch: 1
+    envs_per_worker: 1
+    batch_size: 1024
+    total_timesteps: 10000
+    pool_kernel: [0, 1]
+    checkpoint_interval: 3
+    verbose: True
+
+train:
+  seed: 1
+  torch_deterministic: True
+  device: cuda
+  total_timesteps: 10_000_000
+  learning_rate: 1.5e-4
+  anneal_lr: True
+  gamma: 0.99
+  gae_lambda: 0.95
+  update_epochs: 3
+  norm_adv: True
+  clip_coef: 0.1
+  clip_vloss: True
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: ~
+
+  num_envs: 8
+  envs_per_worker: 1
+  envs_per_batch: 4
+  env_pool: True
+  verbose: True
+  data_dir: runs
+  checkpoint_interval: 200
+  pool_kernel: [0]
+  batch_size: 8192
+  batch_rows: 64
+  bptt_horizon: 8
+  vf_clip_coef: 0.1
+  compile: False
+  compile_mode: reduce-overhead
+
+sweep:
+  method: random
+  name: sweep
+  metric:
+    goal: maximize
+    name: episodic_return
+  parameters:
+    train:
+      parameters:
+        learning_rate: {
+          'distribution': 'log_uniform_values',
+          'min': 1e-4,
+          'max': 1e-1,
+        }
+        batch_size: {
+          'values': [128, 256, 512, 1024, 2048],
+        }
+        batch_rows: {
+          'values': [16, 32, 64, 128, 256],
+        }
+        bptt_horizon: {
+          'values': [4, 8, 16, 32],
+        }
+
+env:
+  num_agents: 128
+  num_npcs: 256
+  max_episode_length: 1024
+  maps_path: 'maps/train/'
+  map_size: 128
+  num_maps: 256
+  map_force_generation: False
+  death_fog_tick: ~
+  task_size: 2048
+  spawn_immunity: 20
+  resilient_population: 0.2
+
+policy:
+  input_size: 256
+  hidden_size: 256
+  task_size: 2048
+
+recurrent:
+  input_size: 256
+  hidden_size: 256
+  num_layers: 1
+
+reward_wrapper:
+  eval_mode: false
+  early_stop_agent_num: 8
+  use_custom_reward: True
+
+neurips23_start_kit:
+  reward_wrapper:
+    heal_bonus_weight: 0.03
+    explore_bonus_weight: 0.01
+
+baselinecnn:
+  reward_wrapper:
+    heal_bonus_weight: 0.03
+    explore_bonus_weight: 0.01
+
+gnn:
+  reward_wrapper:
+    eval_mode: false
+    early_stop_agent_num: 0
+    stat_prefix: null
+    use_custom_reward: true
+
+    survival_bonus: 0.02
+    explore_bonus_weight: 0.06
+    clip_unique_event: 3
+
+    harvest_bonus: 0.35
+    fish_bonus: 0.45
+    mine_bonus: 0.65
+    sell_bonus: 0.6
+
+    combat_bonus_weight: 0.5
+    kill_bonus: 6.0
+    movement_penalty: -0.01
+    spawn_distance_weight: 0.001
+    movement_diversity_weight: 0.02
+    resource_proximity_weight: 0.05
+    enemy_seek_weight: 0.8
+    low_health_threshold: 0.3
+    high_health_threshold: 0.6
+    max_health_estimate: 100.0
+
+
+yaofeng:
+  env:
+    maps_path: 'maps/train_yaofeng/'
+    num_maps: 1024
+    resilient_population: 0
+  train:
+    update_epochs: 2
+    learning_rate: 1.0e-4
+  recurrent:
+    num_layers: 2
+  reward_wrapper:
+    hp_bonus_weight: 0.03
+    exp_bonus_weight: 0.002
+    defense_bonus_weight: 0.04
+    attack_bonus_weight: 0.0
+    gold_bonus_weight: 0.001
+    custom_bonus_scale: 0.1
+    disable_give: True
+    donot_attack_dangerous_npc: True
+
+takeru:
+  env:
+    maps_path: 'maps/train_takeru/'
+    num_maps: 1280
+    resilient_population: 0
+  train:
+    update_epochs: 1
+  recurrent:
+    num_layers: 0
+  reward_wrapper:
+    early_stop_agent_num: 0
+    disable_give: True
+
+hybrid:
+  env:
+    maps_path: 'maps/train_yaofeng/'
+    num_maps: 1024
+    resilient_population: 0
+  train:
+    update_epochs: 1
+  recurrent:
+    num_layers: 1
+  reward_wrapper:
+    hp_bonus_weight: 0.03
+    exp_bonus_weight: 0.002
+    defense_bonus_weight: 0.04
+    attack_bonus_weight: 0.0
+    gold_bonus_weight: 0.001
+    custom_bonus_scale: 0.1
+    disable_give: True
+    donot_attack_dangerous_npc: True
